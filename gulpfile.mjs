@@ -18,13 +18,17 @@ import {
   babelPluginPDFJSPreprocessor,
   preprocessPDFJSCode,
 } from "./external/builder/babel-plugin-pdfjs-preprocessor.mjs";
-import { exec, spawn, spawnSync } from "child_process";
+import { exec, execSync, spawn, spawnSync } from "child_process";
 import autoprefixer from "autoprefixer";
 import babel from "@babel/core";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
 import fs from "fs";
 import gulp from "gulp";
+import hljs from "highlight.js";
+import layouts from "@metalsmith/layouts";
+import markdown from "@metalsmith/markdown";
+import Metalsmith from "metalsmith";
 import ordered from "ordered-read-streams";
 import path from "path";
 import postcss from "gulp-postcss";
@@ -33,6 +37,7 @@ import postcssDirPseudoClass from "postcss-dir-pseudo-class";
 import postcssDiscardComments from "postcss-discard-comments";
 import postcssNesting from "postcss-nesting";
 import { preprocess } from "./external/builder/builder.mjs";
+import relative from "metalsmith-html-relative";
 import rename from "gulp-rename";
 import replace from "gulp-replace";
 import stream from "stream";
@@ -445,21 +450,10 @@ function checkChromePreferencesFile(chromePrefsPath, webPrefs) {
 }
 
 function tweakWebpackOutput(jsName) {
-  const replacer = [
-    " __webpack_exports__ = {};", // Normal builds.
-    ",__webpack_exports__={};", // Minified builds.
-  ];
-  const regex = new RegExp(`(${replacer.join("|")})`, "gm");
-
-  return replace(regex, match => {
-    switch (match) {
-      case " __webpack_exports__ = {};":
-        return ` __webpack_exports__ = globalThis.${jsName} = {};`;
-      case ",__webpack_exports__={};":
-        return `,__webpack_exports__=globalThis.${jsName}={};`;
-    }
-    return match;
-  });
+  return replace(
+    /((?:\s|,)__webpack_exports__)(?:\s?)=(?:\s?)({};)/gm,
+    (match, p1, p2) => `${p1} = globalThis.${jsName} = ${p2}`
+  );
 }
 
 function createMainBundle(defines) {
@@ -1521,18 +1515,10 @@ gulp.task("jsdoc", function (done) {
   console.log();
   console.log("### Generating documentation (JSDoc)");
 
-  const JSDOC_FILES = ["src/display/api.js"];
-
   fs.rmSync(JSDOC_BUILD_DIR, { recursive: true, force: true });
   fs.mkdirSync(JSDOC_BUILD_DIR, { recursive: true });
 
-  const command =
-    '"node_modules/.bin/jsdoc" -d ' +
-    JSDOC_BUILD_DIR +
-    " " +
-    JSDOC_FILES.join(" ");
-
-  exec(command, done);
+  exec('"node_modules/.bin/jsdoc" -c jsdoc.json', done);
 });
 
 gulp.task("types", function (done) {
@@ -1685,13 +1671,13 @@ gulp.task(
   )
 );
 
-function compressPublish(targetName, dir) {
+function compressPublish({ sourceDirectory, targetFile, modifiedTime }) {
   return gulp
-    .src(dir + "**", { encoding: false })
-    .pipe(zip(targetName))
+    .src(`${sourceDirectory}**`, { encoding: false })
+    .pipe(zip(targetFile, { modifiedTime }))
     .pipe(gulp.dest(BUILD_DIR))
     .on("end", function () {
-      console.log("Built distribution file: " + targetName);
+      console.log(`Built distribution file: ${targetFile}`);
     });
 }
 
@@ -1704,15 +1690,34 @@ gulp.task(
 
     config.stableVersion = version;
 
+    // ZIP files record the modification date of the source files, so if files
+    // are generated during the build process the output is not reproducible.
+    // To avoid this, the modification dates should be replaced with a fixed
+    // date, in our case the last Git commit date, so that builds from identical
+    // source code result in bit-by-bit identical output. The `gulp-zip` library
+    // supports providing a different modification date to enable reproducible
+    // builds. Note that the Git command below outputs the last Git commit date
+    // as a Unix timestamp (in seconds since epoch), but the `Date` constructor
+    // in JavaScript requires millisecond input, so we have to multiply by 1000.
+    const lastCommitTimestamp = execSync('git log --format="%at" -n 1')
+      .toString()
+      .replace("\n", "");
+    const lastCommitDate = new Date(parseInt(lastCommitTimestamp, 10) * 1000);
+
     return ordered([
       createStringSource(CONFIG_FILE, JSON.stringify(config, null, 2)).pipe(
         gulp.dest(".")
       ),
-      compressPublish("pdfjs-" + version + "-dist.zip", GENERIC_DIR),
-      compressPublish(
-        "pdfjs-" + version + "-legacy-dist.zip",
-        GENERIC_LEGACY_DIR
-      ),
+      compressPublish({
+        sourceDirectory: GENERIC_DIR,
+        targetFile: `pdfjs-${version}-dist.zip`,
+        modifiedTime: lastCommitDate,
+      }),
+      compressPublish({
+        sourceDirectory: GENERIC_LEGACY_DIR,
+        targetFile: `pdfjs-${version}-legacy-dist.zip`,
+        modifiedTime: lastCommitDate,
+      }),
     ]);
   })
 );
@@ -2071,8 +2076,19 @@ gulp.task(
       console.log();
       console.log("### Starting local server");
 
+      let port = 8888;
+      const i = process.argv.indexOf("--port");
+      if (i >= 0 && i + 1 < process.argv.length) {
+        const p = parseInt(process.argv[i + 1], 10);
+        if (!isNaN(p)) {
+          port = p;
+        } else {
+          console.error("Invalid port number: using default (8888)");
+        }
+      }
+
       const { WebServer } = await import("./test/webserver.mjs");
-      const server = new WebServer({ port: 8888 });
+      const server = new WebServer({ port });
       server.start();
     }
   )
@@ -2125,26 +2141,44 @@ function ghPagesPrepare() {
   ]);
 }
 
-gulp.task("wintersmith", async function () {
-  const { default: wintersmith } = await import("wintersmith");
-  const env = wintersmith("docs/config.json");
-
+gulp.task("metalsmith", async function () {
   return new Promise((resolve, reject) => {
-    env.build(GH_PAGES_DIR, function (error) {
-      if (error) {
-        reject(error);
-        return;
-      }
-
-      replaceInFile(
-        GH_PAGES_DIR + "/getting_started/index.html",
-        /STABLE_VERSION/g,
-        config.stableVersion
-      );
-
-      console.log("Done building with wintersmith.");
-      resolve();
-    });
+    Metalsmith(__dirname)
+      .source("docs/contents")
+      .destination(GH_PAGES_DIR)
+      .clean(false)
+      .metadata({
+        sitename: "PDF.js",
+        siteurl: "https://mozilla.github.io/pdf.js",
+        description:
+          "A general-purpose, web standards-based platform for parsing and rendering PDFs.",
+      })
+      .use(
+        markdown({
+          engineOptions: {
+            highlight: (code, language) =>
+              hljs.highlight(code, { language }).value,
+          },
+        })
+      )
+      .use(
+        layouts({
+          directory: "docs/templates",
+        })
+      )
+      .use(relative())
+      .build(error => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        replaceInFile(
+          `${GH_PAGES_DIR}/getting_started/index.html`,
+          /STABLE_VERSION/g,
+          config.stableVersion
+        );
+        resolve();
+      });
   });
 });
 
@@ -2155,7 +2189,7 @@ gulp.task(
     "generic-legacy",
     "jsdoc",
     ghPagesPrepare,
-    "wintersmith"
+    "metalsmith"
   )
 );
 
@@ -2192,11 +2226,12 @@ function packageJson() {
     },
     repository: {
       type: "git",
-      url: DIST_REPO_URL,
+      url: `git+https://github.com/mozilla/pdf.js.git`,
     },
     engines: {
       node: ">=18",
     },
+    scripts: {},
   };
 
   return createStringSource(
@@ -2206,7 +2241,7 @@ function packageJson() {
 }
 
 gulp.task(
-  "dist-pre",
+  "dist",
   gulp.series(
     "generic",
     "generic-legacy",
@@ -2334,7 +2369,7 @@ gulp.task(
 
 gulp.task(
   "dist-install",
-  gulp.series("dist-pre", function createDistInstall(done) {
+  gulp.series("dist", function createDistInstall(done) {
     let distPath = DIST_DIR;
     const opts = {};
     const installPath = process.env.PDFJS_INSTALL_PATH;
@@ -2343,47 +2378,6 @@ gulp.task(
       distPath = path.relative(installPath, distPath);
     }
     safeSpawnSync("npm", ["install", distPath], opts);
-    done();
-  })
-);
-
-gulp.task(
-  "dist",
-  gulp.series("dist-pre", function createDist(done) {
-    const VERSION = getVersionJSON().version;
-
-    console.log();
-    console.log("### Committing changes");
-
-    let reason = process.env.PDFJS_UPDATE_REASON;
-    // Attempt to work-around the broken link, see https://github.com/mozilla/pdf.js/issues/10391
-    if (typeof reason === "string") {
-      const reasonParts =
-        /^(See )(mozilla\/pdf\.js)@tags\/(v\d+\.\d+\.\d+)\s*$/.exec(reason);
-
-      if (reasonParts) {
-        reason =
-          reasonParts[1] +
-          "https://github.com/" +
-          reasonParts[2] +
-          "/releases/tag/" +
-          reasonParts[3];
-      }
-    }
-    const message =
-      "PDF.js version " + VERSION + (reason ? " - " + reason : "");
-    safeSpawnSync("git", ["add", "*"], { cwd: DIST_DIR });
-    safeSpawnSync("git", ["commit", "-am", message], { cwd: DIST_DIR });
-    safeSpawnSync("git", ["tag", "-a", "v" + VERSION, "-m", message], {
-      cwd: DIST_DIR,
-    });
-
-    console.log();
-    console.log("Done. Push with");
-    console.log(
-      "  cd " + DIST_DIR + "; git push --tags " + DIST_REPO_URL + " master"
-    );
-    console.log();
     done();
   })
 );

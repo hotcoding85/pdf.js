@@ -123,6 +123,8 @@ function isValidAnnotationEditorMode(mode) {
  * @property {Object} [pageColors] - Overwrites background and foreground colors
  *   with user defined ones in order to improve readability in high contrast
  *   mode.
+ * @property {boolean} [enableHWA] - Enables hardware acceleration for
+ *   rendering. The default value is `false`.
  */
 
 class PDFPageViewBuffer {
@@ -211,6 +213,8 @@ class PDFViewer {
 
   #containerTopLeft = null;
 
+  #enableHWA = false;
+
   #enableHighlightFloatingButton = false;
 
   #enablePermissions = false;
@@ -218,6 +222,10 @@ class PDFViewer {
   #eventAbortController = null;
 
   #mlManager = null;
+
+  #onPageRenderedCallback = null;
+
+  #switchAnnotationEditorModeTimeoutId = null;
 
   #getAllTextInProgress = false;
 
@@ -296,6 +304,7 @@ class PDFViewer {
     this.#enablePermissions = options.enablePermissions || false;
     this.pageColors = options.pageColors || null;
     this.#mlManager = options.mlManager || null;
+    this.#enableHWA = options.enableHWA || false;
 
     this.defaultRenderingQueue = !options.renderingQueue;
     if (
@@ -735,12 +744,15 @@ class PDFViewer {
       // getAllText and we could just get text from the Selection object.
 
       // Select all the document.
-      const savedCursor = this.container.style.cursor;
-      this.container.style.cursor = "wait";
+      const { classList } = this.viewer;
+      classList.add("copyAll");
 
-      const interruptCopy = ev =>
-        (this.#interruptCopyCondition = ev.key === "Escape");
-      window.addEventListener("keydown", interruptCopy);
+      const ac = new AbortController();
+      window.addEventListener(
+        "keydown",
+        ev => (this.#interruptCopyCondition = ev.key === "Escape"),
+        { signal: ac.signal }
+      );
 
       this.getAllText()
         .then(async text => {
@@ -756,8 +768,8 @@ class PDFViewer {
         .finally(() => {
           this.#getAllTextInProgress = false;
           this.#interruptCopyCondition = false;
-          window.removeEventListener("keydown", interruptCopy);
-          this.container.style.cursor = savedCursor;
+          ac.abort();
+          classList.remove("copyAll");
         });
 
       event.preventDefault();
@@ -943,6 +955,7 @@ class PDFViewer {
             pageColors,
             l10n: this.l10n,
             layerProperties: this._layerProperties,
+            enableHWA: this.#enableHWA,
           });
           this._pages.push(pageView);
         }
@@ -1108,6 +1121,8 @@ class PDFViewer {
 
     this.#hiddenCopyElement?.remove();
     this.#hiddenCopyElement = null;
+
+    this.#cleanupSwitchAnnotationEditorMode();
   }
 
   #ensurePageViewVisible() {
@@ -1642,6 +1657,32 @@ class PDFViewer {
       source: this,
       location: this._location,
     });
+  }
+
+  #switchToEditAnnotationMode() {
+    const visible = this._getVisiblePages();
+    const pagesToRefresh = [];
+    const { ids, views } = visible;
+    for (const page of views) {
+      const { view } = page;
+      if (!view.hasEditableAnnotations()) {
+        ids.delete(view.id);
+        continue;
+      }
+      pagesToRefresh.push(page);
+    }
+
+    if (pagesToRefresh.length === 0) {
+      return null;
+    }
+    this.renderingQueue.renderHighestPriority({
+      first: pagesToRefresh[0],
+      last: pagesToRefresh.at(-1),
+      views: pagesToRefresh,
+      ids,
+    });
+
+    return ids;
   }
 
   containsElement(element) {
@@ -2220,6 +2261,17 @@ class PDFViewer {
     ]);
   }
 
+  #cleanupSwitchAnnotationEditorMode() {
+    if (this.#onPageRenderedCallback) {
+      this.eventBus._off("pagerendered", this.#onPageRenderedCallback);
+      this.#onPageRenderedCallback = null;
+    }
+    if (this.#switchAnnotationEditorModeTimeoutId !== null) {
+      clearTimeout(this.#switchAnnotationEditorModeTimeoutId);
+      this.#switchAnnotationEditorModeTimeoutId = null;
+    }
+  }
+
   get annotationEditorMode() {
     return this.#annotationEditorUIManager
       ? this.#annotationEditorMode
@@ -2250,13 +2302,48 @@ class PDFViewer {
     if (!this.pdfDocument) {
       return;
     }
-    this.#annotationEditorMode = mode;
-    this.eventBus.dispatch("annotationeditormodechanged", {
-      source: this,
-      mode,
-    });
 
-    this.#annotationEditorUIManager.updateMode(mode, editId, isFromKeyboard);
+    const { eventBus } = this;
+    const updater = () => {
+      this.#cleanupSwitchAnnotationEditorMode();
+      this.#annotationEditorMode = mode;
+      eventBus.dispatch("annotationeditormodechanged", {
+        source: this,
+        mode,
+      });
+      this.#annotationEditorUIManager.updateMode(mode, editId, isFromKeyboard);
+    };
+
+    if (
+      mode === AnnotationEditorType.NONE ||
+      this.#annotationEditorMode === AnnotationEditorType.NONE
+    ) {
+      const isEditing = mode !== AnnotationEditorType.NONE;
+      if (!isEditing) {
+        this.pdfDocument.annotationStorage.resetModifiedIds();
+      }
+      for (const pageView of this._pages) {
+        pageView.toggleEditingMode(isEditing);
+      }
+      // We must call #switchToEditAnnotationMode unconditionally to ensure that
+      // page is rendered if it's useful or not.
+      const idsToRefresh = this.#switchToEditAnnotationMode();
+      if (isEditing && editId && idsToRefresh) {
+        // We're editing an existing annotation so we must switch to editing
+        // mode when the rendering is done.
+        this.#cleanupSwitchAnnotationEditorMode();
+        this.#onPageRenderedCallback = ({ pageNumber }) => {
+          idsToRefresh.delete(pageNumber);
+          if (idsToRefresh.size === 0) {
+            this.#switchAnnotationEditorModeTimeoutId = setTimeout(updater, 0);
+          }
+        };
+        const { signal } = this.#eventAbortController;
+        eventBus._on("pagerendered", this.#onPageRenderedCallback, { signal });
+        return;
+      }
+    }
+    updater();
   }
 
   // eslint-disable-next-line accessor-pairs

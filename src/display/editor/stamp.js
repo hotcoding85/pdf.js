@@ -160,26 +160,35 @@ class StampEditor extends AnnotationEditor {
     }
     input.type = "file";
     input.accept = StampEditor.supportedTypesStr;
+    const signal = this._uiManager._signal;
     this.#bitmapPromise = new Promise(resolve => {
-      input.addEventListener("change", async () => {
-        if (!input.files || input.files.length === 0) {
+      input.addEventListener(
+        "change",
+        async () => {
+          if (!input.files || input.files.length === 0) {
+            this.remove();
+          } else {
+            this._uiManager.enableWaiting(true);
+            const data = await this._uiManager.imageManager.getFromFile(
+              input.files[0]
+            );
+            this.#getBitmapFetched(data);
+          }
+          if (typeof PDFJSDev !== "undefined" && PDFJSDev.test("TESTING")) {
+            input.remove();
+          }
+          resolve();
+        },
+        { signal }
+      );
+      input.addEventListener(
+        "cancel",
+        () => {
           this.remove();
-        } else {
-          this._uiManager.enableWaiting(true);
-          const data = await this._uiManager.imageManager.getFromFile(
-            input.files[0]
-          );
-          this.#getBitmapFetched(data);
-        }
-        if (typeof PDFJSDev !== "undefined" && PDFJSDev.test("TESTING")) {
-          input.remove();
-        }
-        resolve();
-      });
-      input.addEventListener("cancel", () => {
-        this.remove();
-        resolve();
-      });
+          resolve();
+        },
+        { signal }
+      );
     }).finally(() => this.#getBitmapDone());
     if (typeof PDFJSDev === "undefined" || !PDFJSDev.test("TESTING")) {
       input.click();
@@ -529,6 +538,11 @@ class StampEditor extends AnnotationEditor {
    * Create the resize observer.
    */
   #createObserver() {
+    if (!this._uiManager._signal) {
+      // This method is called after the canvas has been created but the canvas
+      // creation is async, so it's possible that the viewer has been closed.
+      return;
+    }
     this.#observer = new ResizeObserver(entries => {
       const rect = entries[0].contentRect;
       if (rect.width && rect.height) {
@@ -536,6 +550,14 @@ class StampEditor extends AnnotationEditor {
       }
     });
     this.#observer.observe(this.div);
+    this._uiManager._signal.addEventListener(
+      "abort",
+      () => {
+        this.#observer?.disconnect();
+        this.#observer = null;
+      },
+      { once: true }
+    );
   }
 
   /** @inheritdoc */

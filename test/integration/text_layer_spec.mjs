@@ -13,7 +13,12 @@
  * limitations under the License.
  */
 
-import { closePages, getSpanRectFromText, loadAndWait } from "./test_utils.mjs";
+import {
+  closePages,
+  closeSinglePage,
+  getSpanRectFromText,
+  loadAndWait,
+} from "./test_utils.mjs";
 import { startBrowser } from "../test.mjs";
 
 describe("Text layer", () => {
@@ -227,6 +232,7 @@ describe("Text layer", () => {
         );
       });
       afterAll(async () => {
+        await closeSinglePage(page);
         await browser.close();
       });
 
@@ -288,6 +294,49 @@ describe("Text layer", () => {
           .withContext(`third selection`)
           .toHaveRoughlySelected(/frequently .* We call such a se/s);
       });
+    });
+  });
+
+  describe("when the browser enforces a minimum font size", () => {
+    let browser;
+    let page;
+
+    beforeAll(async () => {
+      // Only testing in Firefox because, while Chrome has a setting similar to
+      // font.minimum-size.x-western, it is not exposed through its API.
+      browser = await startBrowser({
+        browserName: "firefox",
+        startUrl: "",
+        extraPrefsFirefox: { "font.minimum-size.x-western": 40 },
+      });
+      page = await browser.newPage();
+      await page.goto(
+        `${global.integrationBaseUrl}?file=/test/pdfs/tracemonkey.pdf#zoom=100`
+      );
+      await page.bringToFront();
+      await page.waitForSelector(
+        `.page[data-page-number = "1"] .endOfContent`,
+        { timeout: 0 }
+      );
+    });
+
+    afterAll(async () => {
+      await closeSinglePage(page);
+      await browser.close();
+    });
+
+    it("renders spans with the right size", async () => {
+      const rect = await getSpanRectFromText(
+        page,
+        1,
+        "Dynamic languages such as JavaScript are more difﬁcult to com-"
+      );
+
+      // The difference between `a` and `b`, as a percentage of the lower one
+      const getPercentDiff = (a, b) => Math.max(a, b) / Math.min(a, b) - 1;
+
+      expect(getPercentDiff(rect.width, 315)).toBeLessThan(0.03);
+      expect(getPercentDiff(rect.height, 12)).toBeLessThan(0.03);
     });
   });
 });

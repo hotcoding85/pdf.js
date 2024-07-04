@@ -17,7 +17,7 @@
 /** @typedef {import("./api").TextContent} TextContent */
 
 import { AbortException, Util, warn } from "../shared/util.js";
-import { deprecated, setLayerDimensions } from "./display_utils.js";
+import { setLayerDimensions } from "./display_utils.js";
 
 /**
  * @typedef {Object} TextLayerParameters
@@ -83,6 +83,8 @@ class TextLayer {
 
   static #canvasContexts = new Map();
 
+  static #minFontSize = null;
+
   static #pendingTextLayers = new Set();
 
   /**
@@ -119,6 +121,8 @@ class TextLayer {
     this.#transform = [1, 0, 0, -1, -pageX, pageY + pageHeight];
     this.#pageWidth = pageWidth;
     this.#pageHeight = pageHeight;
+
+    TextLayer.#ensureMinFontSizeComputed();
 
     setLayerDimensions(container, viewport);
 
@@ -242,7 +246,7 @@ class TextLayer {
     if (this.#disableProcessItems) {
       return;
     }
-    this.#layoutTextParams.ctx ||= TextLayer.#getCtx(this.#lang);
+    this.#layoutTextParams.ctx ??= TextLayer.#getCtx(this.#lang);
 
     const textDivs = this.#textDivs,
       textContentItemsStr = this.#textContentItemsStr;
@@ -326,7 +330,11 @@ class TextLayer {
       divStyle.left = `${scaleFactorStr}${left.toFixed(2)}px)`;
       divStyle.top = `${scaleFactorStr}${top.toFixed(2)}px)`;
     }
-    divStyle.fontSize = `${scaleFactorStr}${fontHeight.toFixed(2)}px)`;
+    // We multiply the font size by #minFontSize, and then #layout will
+    // scale the element by 1/#minFontSize. This allows us to effectively
+    // ignore the minimum font size enforced by the browser, so that the text
+    // layer <span>s can always match the size of the text in the canvas.
+    divStyle.fontSize = `${scaleFactorStr}${(TextLayer.#minFontSize * fontHeight).toFixed(2)}px)`;
     divStyle.fontFamily = fontFamily;
 
     textDivProperties.fontSize = fontHeight;
@@ -388,7 +396,12 @@ class TextLayer {
   #layout(params) {
     const { div, properties, ctx, prevFontSize, prevFontFamily } = params;
     const { style } = div;
+
     let transform = "";
+    if (TextLayer.#minFontSize > 1) {
+      transform = `scale(${1 / TextLayer.#minFontSize})`;
+    }
+
     if (properties.canvasWidth !== 0 && properties.hasText) {
       const { fontFamily } = style;
       const { canvasWidth, fontSize } = properties;
@@ -403,7 +416,7 @@ class TextLayer {
       const { width } = ctx.measureText(div.textContent);
 
       if (width > 0) {
-        transform = `scaleX(${(canvasWidth * this.#scale) / width})`;
+        transform = `scaleX(${(canvasWidth * this.#scale) / width}) ${transform}`;
       }
     }
     if (properties.angle !== 0) {
@@ -447,10 +460,33 @@ class TextLayer {
       canvas.className = "hiddenCanvasElement";
       canvas.lang = lang;
       document.body.append(canvas);
-      canvasContext = canvas.getContext("2d", { alpha: false });
+      canvasContext = canvas.getContext("2d", {
+        alpha: false,
+        willReadFrequently: true,
+      });
       this.#canvasContexts.set(lang, canvasContext);
     }
     return canvasContext;
+  }
+
+  /**
+   * Compute the minimum font size enforced by the browser.
+   */
+  static #ensureMinFontSizeComputed() {
+    if (this.#minFontSize !== null) {
+      return;
+    }
+    const div = document.createElement("div");
+    div.style.opacity = 0;
+    div.style.lineHeight = 1;
+    div.style.fontSize = "1px";
+    div.textContent = "X";
+    document.body.append(div);
+    // In `display:block` elements contain a single line of text,
+    // the height matches the line height (which, when set to 1,
+    // matches the actual font size).
+    this.#minFontSize = div.getBoundingClientRect().height;
+    div.remove();
   }
 
   static #getAscent(fontFamily, lang) {
@@ -521,40 +557,4 @@ class TextLayer {
   }
 }
 
-function renderTextLayer() {
-  if (typeof PDFJSDev !== "undefined" && PDFJSDev.test("MOZCENTRAL")) {
-    return;
-  }
-  deprecated("`renderTextLayer`, please use `TextLayer` instead.");
-
-  const { textContentSource, container, viewport, ...rest } = arguments[0];
-  const restKeys = Object.keys(rest);
-  if (restKeys.length > 0) {
-    warn("Ignoring `renderTextLayer` parameters: " + restKeys.join(", "));
-  }
-
-  const textLayer = new TextLayer({
-    textContentSource,
-    container,
-    viewport,
-  });
-
-  const { textDivs, textContentItemsStr } = textLayer;
-  const promise = textLayer.render();
-
-  // eslint-disable-next-line consistent-return
-  return {
-    promise,
-    textDivs,
-    textContentItemsStr,
-  };
-}
-
-function updateTextLayer() {
-  if (typeof PDFJSDev !== "undefined" && PDFJSDev.test("MOZCENTRAL")) {
-    return;
-  }
-  deprecated("`updateTextLayer`, please use `TextLayer` instead.");
-}
-
-export { renderTextLayer, TextLayer, updateTextLayer };
+export { TextLayer };

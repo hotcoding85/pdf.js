@@ -5439,6 +5439,15 @@
     "type": "eq"
   },
   {
+    "id": "issue18298",
+    "file": "pdfs/issue18298.pdf",
+    "md5": "30a6108220c41ec88fa92ff45924a6cb",
+    "rounds": 1,
+    "link": true,
+    "lastPage": 1,
+    "type": "eq"
+  },
+  {
     "id": "issue18138",
     "file": "pdfs/issue18138.pdf",
     "md5": "06136495b2dee5faed2e87c4e49d17fd",
@@ -10012,6 +10021,7 @@
     "id": "issue17779",
     "file": "pdfs/issue17779.pdf",
     "md5": "764b72e8e56e22662b321b308254fd2b",
+    "talos": false,
     "rounds": 1,
     "link": true,
     "type": "eq"
@@ -10078,6 +10088,28 @@
     "id": "bug1899804",
     "file": "pdfs/bug1899804.pdf",
     "md5": "53d82575d6d5d314404ede8970073e1b",
+    "rounds": 1,
+    "link": true,
+    "type": "eq"
+  },
+  {
+    "id": "bug1539074",
+    "file": "pdfs/bug1539074.pdf",
+    "md5": "73922be020083d54747af18a4d5e0768",
+    "rounds": 1,
+    "type": "eq"
+  },
+  {
+    "id": "bug1539074_1",
+    "file": "pdfs/bug1539074.1.pdf",
+    "md5": "d15c49142fda433323d3d35f2762cd33",
+    "rounds": 1,
+    "type": "eq"
+  },
+  {
+    "id": "bug1903731",
+    "file": "pdfs/bug1903731.pdf",
+    "md5": "c90d1b03a62d0221e5f5609e3db16a38",
     "rounds": 1,
     "link": true,
     "type": "eq"
